@@ -46,7 +46,7 @@ typedef struct
     Handle statusMutex;
     Handle sockMutex;
     int running;
-    float samplePerSecond;
+    int samplePerSecond;
 } ThreadScannerArgs;
 
 void threadScanner(void *_args)
@@ -55,6 +55,9 @@ void threadScanner(void *_args)
     // this thread scans input and update input status
     // and then send the status to remote host
     volatile ThreadScannerArgs *args = (ThreadScannerArgs*)_args;
+    double sampleInterval = 1.0f / args->samplePerSecond;
+    u64 lastSample = svcGetSystemTick();
+    double clock = 268111856; // ~268mHz
 	while (args->running)
     {
         svcWaitSynchronization(&args->statusMutex, U64_MAX); // just wait for mutex forever
@@ -65,6 +68,13 @@ void threadScanner(void *_args)
         svcWaitSynchronization(&args->sockMutex, U64_MAX);
         sendto(args->sock, &args->status, sizeof(args->status), 0, (struct sockaddr *)&args->remote, sizeof(args->remote));
         svcReleaseMutex(&args->sockMutex);
+        
+        u64 now = svcGetSystemTick();
+        u64 d_ticks = now - lastSample;
+        lastSample = now;
+        double dt = d_ticks / clock;
+        double spare = sampleInterval - dt;
+        svcSleepThread(spare * 1000000000); // unit: ns
     }
 }
 
@@ -130,10 +140,14 @@ int main(int argc, char **argv)
     int port_index = ini_find_property(ini, INI_GLOBAL_SECTION, "port", 0);
     char const *port_str = ini_property_value(ini, INI_GLOBAL_SECTION, port_index);
     int port = atoi(port_str);
-    printf("Sending data to: %s:%d\n", remote, port);
+    int sps_index = ini_find_property(ini, INI_GLOBAL_SECTION, "sample_per_second", 0);
+    char const *sps_str = ini_property_value(ini, INI_GLOBAL_SECTION, sps_index);
+    int sps = atoi(sps_str);
+    printf("Sending data to: %s:%d\nsamples per second: %d\n", remote, port, sps);
 
     volatile ThreadScannerArgs scannerArgs;
     scannerArgs.running = 1;
+    scannerArgs.samplePerSecond = sps;
     scannerArgs.sock = sock;
     memset(&scannerArgs.remote, 0 ,sizeof(scannerArgs.remote));
     scannerArgs.remote.sin_family = AF_INET;
@@ -170,6 +184,8 @@ int main(int argc, char **argv)
     printf("\nExiting ...");
     scannerArgs.running = 0;
     threadJoin(scanner, U64_MAX);
+    close(sock);
+    svcSleepThread(2000000000);
 	// Exit services
     socExit();
 	gfxExit();
